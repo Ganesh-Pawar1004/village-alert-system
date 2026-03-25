@@ -40,6 +40,10 @@ app.use((req, _res, next) => {
 });
 
 // 2. Environment-aware CORS (Includes Capacitor Mobile Native WebViews)
+// Optionally allow a local dev origin for testing against production backend
+// Set ALLOWED_LOCAL_ORIGIN=http://localhost:5173 in Railway env vars to enable
+const extraOrigin = process.env.ALLOWED_LOCAL_ORIGIN;
+
 const allowedOrigins = {
     development: ['http://localhost:5173', 'http://localhost:3000', 'capacitor://localhost', 'http://localhost'],
     uat:         ['https://uat.village-alert.app', 'capacitor://localhost', 'http://localhost'],
@@ -48,10 +52,13 @@ const allowedOrigins = {
 
 app.use(cors({
     origin: (origin, callback) => {
-        // Allow requests with no origin (like mobile apps sometimes send, or server-to-server)
+        // Allow requests with no origin (native mobile apps)
         if (!origin) return callback(null, true);
-        
+
         const origins = allowedOrigins[ENV] || allowedOrigins.development;
+
+        // Allow the configured extra origin (e.g. localhost for testing prod)
+        if (extraOrigin && origin === extraOrigin) return callback(null, true);
         if (origins.includes(origin)) return callback(null, true);
 
         // Reject all other cross-origin requests
