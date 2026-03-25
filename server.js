@@ -48,9 +48,9 @@ app.use((req, _res, next) => {
 const extraOrigin = process.env.ALLOWED_LOCAL_ORIGIN;
 
 const allowedOrigins = {
-    development: ['http://localhost:5173', 'http://localhost:3000', 'capacitor://localhost', 'http://localhost'],
-    uat:         ['https://uat.village-alert.app', 'capacitor://localhost', 'http://localhost', 'http://localhost:5173'],
-    production:  ['https://village-alert.app', 'capacitor://localhost', 'http://localhost', 'http://localhost:5173'],
+    development: ['http://localhost:5173', 'http://localhost:3000', 'capacitor://localhost', 'http://localhost', 'https://localhost'],
+    uat:         ['https://uat.village-alert.app', 'capacitor://localhost', 'http://localhost', 'http://localhost:5173', 'https://localhost'],
+    production:  ['https://village-alert.app', 'capacitor://localhost', 'http://localhost', 'http://localhost:5173', 'https://localhost'],
 };
 
 app.use(cors({
