@@ -3,7 +3,6 @@ const express    = require('express');
 const cors       = require('cors');
 const rateLimit  = require('express-rate-limit');
 const helmet     = require('helmet');
-const xss        = require('xss-clean');
 const { createClient } = require('@supabase/supabase-js');
 const { requestOtp, verifyOtp, authMiddleware, requireRole, otpStore } = require('./src/auth');
 
@@ -21,8 +20,24 @@ const app = express();
 
 // 1. Basic HTTP Header Hardening & Sanitization
 app.use(helmet());
-app.use(express.json({ limit: '10mb' })); // Increased to 10MB to allow Base64 voice recording uploads
-app.use(xss()); // Sanitize req.body, req.query, req.params against XSS arrays/strings
+app.use(express.json({ limit: '10mb' })); // 10MB to allow Base64 voice recording uploads
+
+// Custom XSS sanitizer — strips HTML tags from all string values in req.body
+// (replaces broken xss-clean library which is incompatible with Express v5+)
+app.use((req, _res, next) => {
+    function sanitize(obj) {
+        if (typeof obj === 'string') return obj.replace(/<[^>]*>/g, '').trim();
+        if (Array.isArray(obj)) return obj.map(sanitize);
+        if (obj && typeof obj === 'object') {
+            const clean = {};
+            for (const key of Object.keys(obj)) clean[key] = sanitize(obj[key]);
+            return clean;
+        }
+        return obj;
+    }
+    if (req.body) req.body = sanitize(req.body);
+    next();
+});
 
 // 2. Environment-aware CORS (Includes Capacitor Mobile Native WebViews)
 const allowedOrigins = {
