@@ -6,18 +6,18 @@
  *   - UAT / PRODUCTION: Redis via ioredis for distributed, persistent OTP state
  */
 
-const jwt    = require('jsonwebtoken');
-const Redis  = require('ioredis');
+const jwt = require('jsonwebtoken');
+const Redis = require('ioredis');
 const { randomInt } = require('crypto');
 
-const ENV        = process.env.NODE_ENV || 'development';
+const ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = process.env.JWT_SECRET || 'village-alert-system-dev-secret-CHANGE-IN-PROD';
-const JWT_EXPIRY = process.env.JWT_EXPIRY  || '7d';
+const JWT_EXPIRY = process.env.JWT_EXPIRY || '7d';
 
-const OTP_TTL_SECONDS  = 5 * 60;       // 5 minutes
-const OTP_RESEND_WAIT  = 60;            // seconds
-const MAX_ATTEMPTS     = 30;           // user-requested 30 attempts
-const LOCKOUT_SECONDS  = 15 * 60;      // 15 minutes lockout after failure
+const OTP_TTL_SECONDS = 5 * 60;       // 5 minutes
+const OTP_RESEND_WAIT = 60;            // seconds
+const MAX_ATTEMPTS = 30;           // user-requested 30 attempts
+const LOCKOUT_SECONDS = 15 * 60;      // 15 minutes lockout after failure
 
 // ─── OTP Store (Redis or in-memory) ───────────────────────────────────────────
 
@@ -29,7 +29,7 @@ if (ENV !== 'development' && process.env.REDIS_URL) {
         lazyConnect: true,
     });
     redis.on('connect', () => console.log('[Redis] Connected to OTP store'));
-    redis.on('error',   (e) => console.error('[Redis] Error:', e.message));
+    redis.on('error', (e) => console.error('[Redis] Error:', e.message));
 } else {
     console.log(`[AUTH] Using in-memory OTP store (${ENV} mode)`);
 }
@@ -200,10 +200,10 @@ async function verifyOtp(req, res, supabase) {
 
     // ─── Super Admin Static Bypass ──────────────────────────────────────────────
     // Crucial for when SMS is rolled out (disabled) in production
-    const isSuperAdminBypass = 
-        process.env.SUPERADMIN_PHONE && 
-        process.env.SUPERADMIN_OTP && 
-        phone === process.env.SUPERADMIN_PHONE && 
+    const isSuperAdminBypass =
+        process.env.SUPERADMIN_PHONE &&
+        process.env.SUPERADMIN_OTP &&
+        phone === process.env.SUPERADMIN_PHONE &&
         String(otp) === process.env.SUPERADMIN_OTP;
 
     if (!isSuperAdminBypass) {

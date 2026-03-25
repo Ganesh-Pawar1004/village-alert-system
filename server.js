@@ -466,9 +466,46 @@ app.post('/api/alerts/send', authMiddleware, requireRole('village_owner', 'admin
             }
         }
 
-        res.status(201).json({ message: 'Alert sent successfully', alert: alertData });
+        res.status(201).json({ 
+            message: 'Alert sent successfully', 
+            alert: alertData,
+            total_users: users ? users.length : 0
+        });
     } catch (err) {
         console.error('Server error:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+/**
+ * GET /api/alerts/:id/stats
+ * Real-time telemetry for an alert.
+ * Returns: { total, acked, fcm, sms, call }
+ */
+app.get('/api/alerts/:id/stats', authMiddleware, async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Query all delivery records for this alert to calculate real-time stats
+        const { data: deliveries, error } = await supabase
+            .from('deliveries')
+            .select('status, channel')
+            .eq('alert_id', id);
+
+        if (error) throw error;
+
+        // Calculate counts based on current delivery states
+        const stats = {
+            total: deliveries.length,
+            acked: deliveries.filter(d => d.status === 'acked').length,
+            fcm:   deliveries.filter(d => d.channel === 'fcm' || (d.channel === 'sms' && d.status === 'pending')).length, // default fallback
+            sms:   deliveries.filter(d => d.channel === 'sms').length,
+            call:  deliveries.filter(d => d.channel === 'call').length,
+        };
+
+        res.json(stats);
+    } catch (err) {
+        console.error('[STATS] Server error:', err);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
