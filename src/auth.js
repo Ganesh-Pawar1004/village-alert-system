@@ -16,7 +16,8 @@ const JWT_EXPIRY = process.env.JWT_EXPIRY  || '7d';
 
 const OTP_TTL_SECONDS  = 5 * 60;       // 5 minutes
 const OTP_RESEND_WAIT  = 60;            // seconds
-const MAX_ATTEMPTS     = 3;
+const MAX_ATTEMPTS     = 30;           // user-requested 30 attempts
+const LOCKOUT_SECONDS  = 15 * 60;      // 15 minutes lockout after failure
 
 // ─── OTP Store (Redis or in-memory) ───────────────────────────────────────────
 
@@ -62,6 +63,21 @@ const otpStore = {
         // Update in place; Redis: preserve remaining TTL approx
         await this.set(phone, record);
     },
+    async setLockout(phone) {
+        if (redis) {
+            await redis.set(`lockout:${phone}`, 'true', 'EX', LOCKOUT_SECONDS);
+        } else {
+            memLockouts.set(phone, Date.now() + LOCKOUT_SECONDS * 1000);
+            setTimeout(() => memLockouts.delete(phone), LOCKOUT_SECONDS * 1000);
+        }
+    },
+    async isLockedOut(phone) {
+        if (redis) {
+            return await redis.get(`lockout:${phone}`) === 'true';
+        }
+        const expiry = memLockouts.get(phone);
+        return expiry && Date.now() < expiry;
+    },
     async getAll() {
         const otps = [];
         if (redis) {
@@ -79,6 +95,7 @@ const otpStore = {
     }
 };
 const memStore = new Map(); // fallback for DEV
+const memLockouts = new Map();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -139,6 +156,10 @@ async function requestOtp(req, res) {
         return res.status(400).json({ error: 'A valid 10-digit Indian mobile number is required.' });
     }
 
+    if (await otpStore.isLockedOut(phone)) {
+        return res.status(429).json({ error: 'Account locked for 15 minutes due to too many failed attempts.' });
+    }
+
     const now = Date.now();
     const existing = await otpStore.get(phone);
 
@@ -186,6 +207,9 @@ async function verifyOtp(req, res, supabase) {
         String(otp) === process.env.SUPERADMIN_OTP;
 
     if (!isSuperAdminBypass) {
+        if (await otpStore.isLockedOut(phone)) {
+            return res.status(429).json({ error: 'Account locked for 15 minutes due to too many failed attempts.' });
+        }
         const record = await otpStore.get(phone);
 
         if (!record) {
@@ -197,20 +221,19 @@ async function verifyOtp(req, res, supabase) {
             return res.status(400).json({ error: 'OTP has expired. Please request a new one.' });
         }
 
-        record.attempts += 1;
-        if (record.attempts > MAX_ATTEMPTS) {
-            await otpStore.del(phone);
-            return res.status(429).json({ error: 'Too many failed attempts. OTP invalidated.' });
-        }
-
         if (record.otp !== String(otp)) {
+            record.attempts += 1;
+            if (record.attempts >= MAX_ATTEMPTS) {
+                await otpStore.del(phone);
+                await otpStore.setLockout(phone);
+                return res.status(429).json({ error: 'Too many failed attempts. Locked for 15 minutes.' });
+            }
             await otpStore.update(phone, record);
             const remaining = MAX_ATTEMPTS - record.attempts;
             return res.status(401).json({ error: `Incorrect OTP. ${remaining} attempt(s) left.` });
         }
 
-        // ✓ Valid — consume OTP
-        await otpStore.del(phone);
+        // ✓ Valid — but DO NOT consume yet. Wait until user record is verified/created.
     } // end bypass check
 
     // Upsert user
@@ -237,6 +260,11 @@ async function verifyOtp(req, res, supabase) {
             return res.status(500).json({ error: 'Failed to create account.' });
         }
         user = newUser;
+    }
+
+    // Success — Consume OTP now
+    if (!isSuperAdminBypass) {
+        await otpStore.del(phone);
     }
 
     // Sign JWT
