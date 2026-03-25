@@ -18,6 +18,9 @@ if (ENV === 'production') {
 
 const app = express();
 
+// Trust Railway/Render/Heroku reverse proxy (needed for rate limiting to work correctly)
+app.set('trust proxy', 1);
+
 // 1. Basic HTTP Header Hardening & Sanitization
 app.use(helmet());
 app.use(express.json({ limit: '10mb' })); // 10MB to allow Base64 voice recording uploads
