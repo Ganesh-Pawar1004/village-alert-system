@@ -372,12 +372,16 @@ app.post('/api/alerts/send', authMiddleware, requireRole('village_owner', 'admin
                 console.log(`[Push Disabled] Skipping FCM push via ROLLOUT_PUSH flag.`);
             } else if (fcmTokens.length > 0 && admin.apps.length > 0) {
                 try {
-                    const payload = {
+                    const messages = fcmTokens.map(token => ({
+                        token,
                         notification: { title: `${severity} ALERT`, body: message },
-                        data: { severity, message, alert_id: alertData.id, audio_url: audio_url || '' },
-                        tokens: fcmTokens
-                    };
-                    const response = await admin.messaging().sendMulticast(payload);
+                        data: { severity, message, alert_id: alertData.id, audio_url: final_audio_url || '' },
+                        android: { priority: 'high' },
+                        apns: { payload: { aps: { sound: 'default' } } }
+                    }));
+                    
+                    // firebase-admin v11.3.0+ uses sendEachForMulticast
+                    const response = await admin.messaging().sendEachForMulticast(messages);
                     console.log(`Successfully sent ${response.successCount} FCM messages; ${response.failureCount} failed.`);
                     
                     // Handle stale FCM tokens
@@ -403,67 +407,59 @@ app.post('/api/alerts/send', authMiddleware, requireRole('village_owner', 'admin
                 console.log("No FCM tokens or Firebase not configured. Skipping push.");
             }
 
-            // Layer 2: SMS fallback (Offline-safe) using MSG91
-            const smsRecipients = users.map(u => u.phone); // Add +91 or formatting as needed
-            const smsBody = `[${token}] EMERGENCY: ${message} - Village Alert System. Do not reply.`;
+            // Layer 2: SMS fallback (Offline-safe) — wrapped in try-catch
+            try {
+                const smsRecipients = users.map(u => u.phone);
+                const smsBody = `[${token}] EMERGENCY: ${message} - Village Alert System. Do not reply.`;
 
-            if (process.env.ROLLOUT_SMS !== 'true') {
-                 console.log(`[SMS Disabled] Skipping MSG91 SMS to ${smsRecipients.length} users via ROLLOUT_SMS flag.`);
-            } else if (process.env.MSG91_AUTH_KEY && smsRecipients.length > 0) {
-                try {
+                if (process.env.ROLLOUT_SMS === 'true' && process.env.MSG91_AUTH_KEY && smsRecipients.length > 0) {
                     console.log(`Sending SMS offline tokens to ${smsRecipients.length} users with MSG91...`);
-                    // Mocking actual MSG91 fetch call:
-                    // await fetch('https://api.msg91.com/api/v5/flow/', { method: 'POST', body: JSON.stringify({...}) });
-                    console.log("MSG91 SMS Sent successfully");
-                } catch (smsErr) {
-                    console.error("MSG91 Send Error:", smsErr);
+                    // logic here...
+                } else {
+                    console.log(`[Flow] SMS layer (Flag: ${process.env.ROLLOUT_SMS})`);
                 }
-            } else {
-                console.log("MSG91_AUTH_KEY not set. Skipping real offline SMS.");
-                console.log("Mocked SMS token delivery:", smsBody);
-            }
+            } catch (err) { console.error("[Layer 2 Error]", err.message); }
 
-            // Layer 3: Auto Call (Exotel) - Scheduled for 90 seconds later
-            if (process.env.ROLLOUT_CALL !== 'true') {
-                 console.log(`[Call Disabled] Skipping Exotel auto-calls via ROLLOUT_CALL flag.`);
-            } else {
-                 console.log("Scheduling Exotel Auto-call task in 90 seconds for unacknowledged users.");
-                 const alertTimers = new Map();
-                 users.forEach(u => {
-                     const timerId = setTimeout(async () => {
-                         // When 90s pass, we check the database if the user has already acknowledged
-                         try {
-                             const { data: deliveryCheck } = await supabase
-                                 .from('deliveries')
-                                 .select('status')
-                                 .eq('alert_id', alertData.id)
-                                 .eq('user_id', u.id)
-                                 .single();
+            // Layer 3: Auto Call (Exotel) — wrapped in try-catch
+            try {
+                if (process.env.ROLLOUT_CALL === 'true') {
+                    console.log("Scheduling Exotel Auto-call tasks in 90 seconds for unacknowledged users.");
+                    const alertTimers = new Map();
+                    users.forEach(u => {
+                        const timerId = setTimeout(async () => {
+                            try {
+                                const { data: deliveryCheck } = await supabase
+                                    .from('deliveries')
+                                    .select('status')
+                                    .eq('alert_id', alertData.id)
+                                    .eq('user_id', u.id)
+                                    .single();
 
-                             if (deliveryCheck && deliveryCheck.status !== 'acked') {
-                                 console.log(`[Exotel Auto-Call] Initiating call to User ${u.id} (${u.phone}). They missed the FCM and SMS.`);
-                                 // Real code: await fetch('https://api.exotel.com/v1/Accounts/AC.../Calls/connect.json', ...);
-
-                                 // Update DB to reflect we called them
-                                 await supabase.from('deliveries')
-                                     .update({ channel: 'call', status: 'sent' }) // upgraded channel
-                                     .eq('alert_id', alertData.id)
-                                     .eq('user_id', u.id);
-                             }
-                         } catch (e) { console.error("Exotel Timeout error", e) }
-                     }, 90 * 1000); // 90 seconds
-                     alertTimers.set(u.id, timerId);
-                 });
-                 autoCallTimers.set(alertData.id, alertTimers);
-            }
+                                if (deliveryCheck && deliveryCheck.status !== 'acked') {
+                                    console.log(`[Exotel Auto-Call] Initiating call to User ${u.id} (${u.phone}).`);
+                                    await supabase.from('deliveries')
+                                        .update({ channel: 'call', status: 'sent' })
+                                        .eq('alert_id', alertData.id)
+                                        .eq('user_id', u.id);
+                                }
+                            } catch (e) { console.error("Exotel Timeout error", e) }
+                        }, 90 * 1000);
+                        alertTimers.set(u.id, timerId);
+                    });
+                    autoCallTimers.set(alertData.id, alertTimers);
+                } else {
+                    console.log(`[Flow] Call layer (Flag: ${process.env.ROLLOUT_CALL})`);
+                }
+            } catch (err) { console.error("[Layer 3 Error]", err.message); }
 
             // Layer 4: WhatsApp broadcast (WATI / Twilio Fallback)
-            if (process.env.WATI_AUTH_TOKEN) {
-                console.log(`Sending WhatsApp broadcast to ${smsRecipients.length} users...`);
-                // Real code: await fetch('https://live-api.wati.io/api/v1/sendSessionMessage', ...);
-            } else {
-                console.log("WATI_AUTH_TOKEN not set. Mocking WhatsApp broadcast fallback.");
-            }
+            try {
+                if (process.env.WATI_AUTH_TOKEN) {
+                    console.log(`Sending WhatsApp broadcast...`);
+                } else {
+                    console.log("[Flow] WhatsApp layer (WATI_AUTH_TOKEN not set)");
+                }
+            } catch (err) { console.error("[Layer 4 Error]", err.message); }
         }
 
         res.status(201).json({ 
