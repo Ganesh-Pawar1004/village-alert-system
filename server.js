@@ -531,17 +531,40 @@ app.put('/api/alerts/:id/retract', authMiddleware, requireRole('village_owner', 
         const { id } = req.params;
         const { user_id } = req.body; // should be the admin handling it
         
-        // Mark alert as resolved
+        // 1. Get the alert to find its village_id
+        const { data: alertData, error: fetchErr } = await supabase.from('alerts').select('village_id').eq('id', id).single();
+        if (fetchErr) throw fetchErr;
+
+        // 2. Mark alert as resolved
         const { error } = await supabase.from('alerts').update({ resolved_at: new Date().toISOString() }).eq('id', id);
         if (error) throw error;
         
-        // Cancel all pending Exotel calls for this alert
+        // 3. Cancel all pending Exotel calls for this alert
         if (autoCallTimers.has(id)) {
             const userTimers = autoCallTimers.get(id);
             userTimers.forEach(timer => clearTimeout(timer));
             autoCallTimers.delete(id);
             console.log(`[RETRACTED] Cancelled all pending auto-calls for alert ${id}.`);
         }
+
+        // 4. Send Silent Push to stop ringing on all devices
+        try {
+            if (admin.apps.length > 0) {
+                const { data: users } = await supabase.from('users').select('fcm_token').eq('village_id', alertData.village_id).neq('fcm_token', null);
+                if (users && users.length > 0) {
+                    const tokens = users.map(u => u.fcm_token);
+                    if (tokens.length > 0) {
+                        const messages = tokens.map(token => ({
+                            token,
+                            data: { action: 'abort', alert_id: id }
+                        }));
+                        await admin.messaging().sendEachForMulticast(messages);
+                        console.log(`[Abort] Sent silence signal to ${tokens.length} devices.`);
+                    }
+                }
+            }
+        } catch (pushErr) { console.error("Abort push failed", pushErr); }
+
         res.json({ success: true, message: 'Alert retracted successfully. All pending automation stopped.' });
     } catch (err) {
         console.error('Server error:', err);
