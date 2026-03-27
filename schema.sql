@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS users (
   name        TEXT NOT NULL,
   village_id  UUID REFERENCES villages(id),
   role        TEXT CHECK (role IN ('admin', 'village_owner', 'villager')) DEFAULT 'villager',
+  session_id  UUID,                        -- tracks the single active device
   fcm_token   TEXT,                        -- updated on every app open
   is_active   BOOLEAN DEFAULT true,
   is_approved BOOLEAN DEFAULT false,       -- only village_owners need approval

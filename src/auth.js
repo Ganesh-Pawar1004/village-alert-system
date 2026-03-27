@@ -8,7 +8,7 @@
 
 const jwt = require('jsonwebtoken');
 const Redis = require('ioredis');
-const { randomInt } = require('crypto');
+const { randomInt, randomUUID } = require('crypto');
 
 const ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = process.env.JWT_SECRET || 'village-alert-system-dev-secret-CHANGE-IN-PROD';
@@ -267,9 +267,24 @@ async function verifyOtp(req, res, supabase) {
         await otpStore.del(phone);
     }
 
+    const sessionId = randomUUID();
+
+    const { error: sessionError } = await supabase
+        .from('users')
+        .update({ session_id: sessionId, fcm_token: null })
+        .eq('id', user.id);
+
+    if (sessionError) {
+        console.error('[AUTH] session update error:', sessionError);
+        return res.status(500).json({ error: 'Failed to create session.' });
+    }
+
+    user.session_id = sessionId;
+    user.fcm_token = null;
+
     // Sign JWT
     const token = jwt.sign(
-        { sub: user.id, phone: user.phone, role: user.role, village_id: user.village_id },
+        { sub: user.id, phone: user.phone, role: user.role, session_id: user.session_id, village_id: user.village_id },
         JWT_SECRET,
         { expiresIn: JWT_EXPIRY, issuer: 'village-alert-system' }
     );
@@ -280,13 +295,28 @@ async function verifyOtp(req, res, supabase) {
 
 // ─── JWT Middleware ────────────────────────────────────────────────────────────
 
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
     const header = req.headers['authorization'];
     if (!header?.startsWith('Bearer ')) {
         return res.status(401).json({ error: 'Authorization token required.' });
     }
     try {
-        req.user = jwt.verify(header.split(' ')[1], JWT_SECRET, { issuer: 'village-alert-system' });
+        const decoded = jwt.verify(header.split(' ')[1], JWT_SECRET, { issuer: 'village-alert-system' });
+        
+        const supabase = req.app?.locals?.supabase;
+        if (supabase && decoded.session_id) {
+            const { data: user } = await supabase
+                .from('users')
+                .select('session_id')
+                .eq('id', decoded.sub)
+                .single();
+                
+            if (!user || user.session_id !== decoded.session_id) {
+                return res.status(401).json({ error: 'SESSION_REVOKED', message: 'You have been logged out because your account was accessed from another device.' });
+            }
+        }
+        
+        req.user = decoded;
         next();
     } catch (e) {
         const msg = e.name === 'TokenExpiredError' ? 'Session expired. Please log in again.' : 'Invalid token.';

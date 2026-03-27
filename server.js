@@ -80,6 +80,7 @@ const autoCallTimers = new Map();
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
+app.locals.supabase = supabase; // Make available to global authMiddleware
 
 // Initialize Firebase Admin (optional for local dev if missing creds)
 const admin = require('firebase-admin');
@@ -156,7 +157,7 @@ app.post('/api/auth/refresh', authMiddleware, async (req, res) => {
         if (!user) return res.status(404).json({ error: 'User not found.' });
 
         const newToken = jwt.sign(
-            { sub: user.id, phone: user.phone, role: user.role, village_id: user.village_id },
+            { sub: user.id, phone: user.phone, role: user.role, session_id: user.session_id, village_id: user.village_id },
             secret,
             { expiresIn: expiry, issuer: 'village-alert-system' }
         );
@@ -228,62 +229,7 @@ app.put('/api/users/:id/approve', authMiddleware, requireRole('admin'), async (r
     }
 });
 
-// User Registration endpoint
-app.post('/api/users/register', async (req, res) => {
-    try {
-        const { phone, name, village_id, role } = req.body;
 
-        if (!phone || !name) {
-            return res.status(400).json({ error: 'Missing required fields' });
-        }
-        
-        if (role !== 'admin' && !village_id) {
-             return res.status(400).json({ error: 'Villages require village_id' });
-        }
-
-        const is_approved = (role === 'villager' || role === 'admin') ? true : false; 
-
-        const { data: newUser, error } = await supabase
-            .from('users')
-            .insert([{ phone, name, village_id: village_id || null, role: role || 'villager', is_approved }])
-            .select('*')
-            .single();
-
-        if (error) {
-            console.error('Registration error:', error);
-            if (error.code === '23505') return res.status(409).json({ error: 'Phone number already registered. Please login.' });
-            return res.status(500).json({ error: 'Failed to register user' });
-        }
-
-        res.status(201).json({ message: 'User registered successfully', user: newUser });
-    } catch (err) {
-        console.error('Server error:', err);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// User Login endpoint
-app.post('/api/users/login', async (req, res) => {
-    try {
-        const { phone } = req.body;
-        if (!phone) return res.status(400).json({ error: 'Phone number required' });
-
-        const { data: user, error } = await supabase
-            .from('users')
-            .select('*, villages!left(name)')
-            .eq('phone', phone)
-            .single();
-
-        if (error || !user) {
-            return res.status(404).json({ error: 'User not found. Please register.' });
-        }
-
-        res.status(200).json({ message: 'Login successful', user });
-    } catch (err) {
-        console.error('Login error:', err);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
 
 // Update FCM Token endpoint (protected)
 app.post('/api/users/fcm-token', authMiddleware, async (req, res) => {
@@ -374,8 +320,14 @@ app.post('/api/alerts/send', authMiddleware, requireRole('village_owner', 'admin
                 try {
                     const multicastMessage = {
                         tokens: fcmTokens,
-                        notification: { title: `${severity} ALERT`, body: message },
-                        data: { severity, message, alert_id: String(alertData.id), audio_url: final_audio_url || '' },
+                        data: { 
+                            title: `${severity} ALERT`, 
+                            body: message,
+                            severity: String(severity), 
+                            message: String(message), 
+                            alert_id: String(alertData.id), 
+                            audio_url: final_audio_url || '' 
+                        },
                         android: { priority: 'high' },
                         apns: { payload: { aps: { sound: 'default' } } }
                     };
@@ -506,7 +458,7 @@ app.get('/api/alerts/:id/stats', authMiddleware, async (req, res) => {
 });
 
 // Fetch Alert History for a Village
-app.get('/api/alerts/village/:villageId', async (req, res) => {
+app.get('/api/alerts/village/:villageId', authMiddleware, async (req, res) => {
     try {
         const { villageId } = req.params;
         const { data, error } = await supabase
@@ -555,7 +507,12 @@ app.put('/api/alerts/:id/retract', authMiddleware, requireRole('village_owner', 
                     if (tokens.length > 0) {
                         const multicastMessage = {
                             tokens,
-                            data: { action: 'abort', alert_id: String(id) }
+                            data: { 
+                                action: 'abort', 
+                                alert_id: String(id),
+                                title: 'Alert Resolved',
+                                body: 'The emergency has been resolved.'
+                            }
                         };
                         await admin.messaging().sendEachForMulticast(multicastMessage);
                         console.log(`[Abort] Sent silence signal to ${tokens.length} devices.`);
