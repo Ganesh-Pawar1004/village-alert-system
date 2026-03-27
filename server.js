@@ -372,16 +372,15 @@ app.post('/api/alerts/send', authMiddleware, requireRole('village_owner', 'admin
                 console.log(`[Push Disabled] Skipping FCM push via ROLLOUT_PUSH flag.`);
             } else if (fcmTokens.length > 0 && admin.apps.length > 0) {
                 try {
-                    const messages = fcmTokens.map(token => ({
-                        token,
+                    const multicastMessage = {
+                        tokens: fcmTokens,
                         notification: { title: `${severity} ALERT`, body: message },
-                        data: { severity, message, alert_id: alertData.id, audio_url: final_audio_url || '' },
+                        data: { severity, message, alert_id: String(alertData.id), audio_url: final_audio_url || '' },
                         android: { priority: 'high' },
                         apns: { payload: { aps: { sound: 'default' } } }
-                    }));
+                    };
                     
-                    // firebase-admin v11.3.0+ uses sendEachForMulticast
-                    const response = await admin.messaging().sendEachForMulticast(messages);
+                    const response = await admin.messaging().sendEachForMulticast(multicastMessage);
                     console.log(`Successfully sent ${response.successCount} FCM messages; ${response.failureCount} failed.`);
                     
                     // Handle stale FCM tokens
@@ -554,11 +553,11 @@ app.put('/api/alerts/:id/retract', authMiddleware, requireRole('village_owner', 
                 if (users && users.length > 0) {
                     const tokens = users.map(u => u.fcm_token);
                     if (tokens.length > 0) {
-                        const messages = tokens.map(token => ({
-                            token,
-                            data: { action: 'abort', alert_id: id }
-                        }));
-                        await admin.messaging().sendEachForMulticast(messages);
+                        const multicastMessage = {
+                            tokens,
+                            data: { action: 'abort', alert_id: String(id) }
+                        };
+                        await admin.messaging().sendEachForMulticast(multicastMessage);
                         console.log(`[Abort] Sent silence signal to ${tokens.length} devices.`);
                     }
                 }
