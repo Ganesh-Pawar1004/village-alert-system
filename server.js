@@ -14,6 +14,10 @@ if (ENV === 'production') {
         console.error('FATAL: JWT_SECRET is missing or insecure in PRODUCTION.');
         process.exit(1);
     }
+    if (!process.env.APP_SECRET_KEY || process.env.APP_SECRET_KEY === 'default-secret') {
+        console.error('FATAL: APP_SECRET_KEY is missing or insecure in PRODUCTION.');
+        process.exit(1);
+    }
 }
 
 const app = express();
@@ -101,7 +105,8 @@ try {
 
 // Basic health check
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', env: ENV, message: 'Village Alert System API is running' });
+    // Do not expose environment name in production (tells attackers rate-limiting is disabled)
+    res.json({ status: 'ok', message: 'Gram Suraksha API is running', ...(ENV !== 'production' && { env: ENV }) });
 });
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
@@ -237,6 +242,11 @@ app.post('/api/users/fcm-token', authMiddleware, async (req, res) => {
         const { user_id, fcm_token } = req.body;
         if (!user_id || !fcm_token) return res.status(400).json({ error: 'Missing req fields' });
 
+        // Security: prevent a logged-in user from overwriting another user's FCM token
+        if (user_id !== req.user.sub) {
+            return res.status(403).json({ error: 'Cannot update another user\'s device token.' });
+        }
+
         const { error } = await supabase.from('users').update({ fcm_token }).eq('id', user_id);
         if (error) throw error;
         res.json({ success: true });
@@ -248,10 +258,18 @@ app.post('/api/users/fcm-token', authMiddleware, async (req, res) => {
 // Create Alert endpoint (protected — village_owner only)
 app.post('/api/alerts/send', authMiddleware, requireRole('village_owner', 'admin'), async (req, res) => {
     try {
-        const { village_id, sent_by, severity, message, audio_url, audio_base64 } = req.body;
+        const { severity, message, audio_url, audio_base64 } = req.body;
 
-        if (!village_id || !sent_by || !severity || !message) {
-            return res.status(400).json({ error: 'Missing required fields' });
+        // Security: never trust client-sent sent_by or village_id.
+        // Always derive them from the verified JWT so a modified client cannot spoof sender or village.
+        const sent_by   = req.user.sub;
+        const village_id = req.user.village_id;
+
+        if (!village_id) {
+            return res.status(403).json({ error: 'You are not associated with any village.' });
+        }
+        if (!severity || !message) {
+            return res.status(400).json({ error: 'Missing required fields: severity and message' });
         }
 
         let final_audio_url = audio_url || null;
@@ -259,6 +277,11 @@ app.post('/api/alerts/send', authMiddleware, requireRole('village_owner', 'admin
         // Upload Base64 Audio to Supabase Storage if provided
         if (audio_base64) {
             try {
+                // Security: validate MIME type prefix before processing
+                const mimeMatch = audio_base64.match(/^data:(audio\/\w+);base64,/);
+                if (!mimeMatch) {
+                    return res.status(400).json({ error: 'Invalid audio format. Only audio files are accepted.' });
+                }
                 const base64Data = audio_base64.replace(/^data:audio\/\w+;base64,/, "");
                 const buffer = Buffer.from(base64Data, 'base64');
                 const fileName = `alert_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.webm`;
@@ -293,10 +316,10 @@ app.post('/api/alerts/send', authMiddleware, requireRole('village_owner', 'admin
 
         if (alertError) throw alertError;
 
-        // Fetch all active users in village
+        // Fetch all active users in village (include phone for SMS/call fallback layers)
         const { data: users, error: usersError } = await supabase
             .from('users')
-            .select('id, fcm_token')
+            .select('id, fcm_token, phone')
             .eq('village_id', village_id)
             .eq('is_active', true);
 
@@ -461,6 +484,12 @@ app.get('/api/alerts/:id/stats', authMiddleware, async (req, res) => {
 app.get('/api/alerts/village/:villageId', authMiddleware, async (req, res) => {
     try {
         const { villageId } = req.params;
+
+        // Security: admins can view any village; others can only view their own village
+        if (req.user.role !== 'admin' && req.user.village_id !== villageId) {
+            return res.status(403).json({ error: 'You can only view alerts for your own village.' });
+        }
+
         const { data, error } = await supabase
             .from('alerts')
             .select('*')
@@ -535,6 +564,12 @@ app.post('/api/alerts/ack/:alertId', authMiddleware, async (req, res) => {
         const { user_id } = req.body;
 
         if (!user_id) return res.status(400).json({ error: 'user_id required' });
+
+        // Security: only allow users to acknowledge their own delivery record
+        // Prevents attackers from marking other villagers as 'safe' to suppress auto-calls
+        if (user_id !== req.user.sub) {
+            return res.status(403).json({ error: 'You can only acknowledge your own alerts.' });
+        }
 
         const { error } = await supabase
             .from('deliveries')
