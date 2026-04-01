@@ -255,8 +255,100 @@ app.post('/api/users/fcm-token', authMiddleware, async (req, res) => {
     }
 });
 
-// Create Alert endpoint (protected — village_owner only)
-app.post('/api/alerts/send', authMiddleware, requireRole('village_owner', 'admin'), async (req, res) => {
+// ─── USER PROFILE ─────────────────────────────────────────────────────────────
+
+app.put('/api/users/profile', authMiddleware, async (req, res) => {
+    try {
+        const { name, village_id } = req.body;
+        const user_id = req.user.sub;
+        
+        // Fetch current user details to check if village is changing
+        const { data: currentUser } = await supabase.from('users').select('village_id, role, guard_status').eq('id', user_id).single();
+
+        let updateData = { name };
+        
+        // If they are changing village, auto-revoke guard status (to prevent carrying access to new village)
+        if (village_id && currentUser && currentUser.village_id !== village_id) {
+            updateData.village_id = village_id;
+            if (currentUser.role === 'villager') {
+                updateData.guard_status = 'none';
+            }
+        }
+
+        const { error } = await supabase.from('users').update(updateData).eq('id', user_id);
+        if (error) throw error;
+        
+        res.json({ success: true, message: 'Profile updated' });
+    } catch (err) {
+        console.error('Profile update error:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// ─── VILLAGE GUARDS ───────────────────────────────────────────────────────────
+
+app.post('/api/guards/apply', authMiddleware, async (req, res) => {
+    try {
+        const user_id = req.user.sub;
+        if (req.user.role !== 'villager') return res.status(400).json({ error: 'Only villagers can apply to be guards.' });
+
+        const { error } = await supabase.from('users').update({ guard_status: 'pending' }).eq('id', user_id);
+        if (error) throw error;
+        
+        res.json({ success: true, message: 'Application submitted successfully.' });
+    } catch (err) {
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+app.get('/api/guards/list/:villageId', authMiddleware, requireRole('village_owner', 'admin'), async (req, res) => {
+    try {
+        const { villageId } = req.params;
+        // Owners can only view guards in their own village
+        if (req.user.role === 'village_owner' && req.user.village_id !== villageId) {
+            return res.status(403).json({ error: 'Access denied' });
+        }
+
+        const { data, error } = await supabase
+            .from('users')
+            .select('id, name, phone, guard_status, created_at')
+            .eq('village_id', villageId)
+            .eq('role', 'villager')
+            .in('guard_status', ['pending', 'approved'])
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+        res.json(data);
+    } catch (err) {
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+app.post('/api/guards/update', authMiddleware, requireRole('village_owner', 'admin'), async (req, res) => {
+    try {
+        const { target_user_id, status } = req.body;
+        if (!['approved', 'none'].includes(status)) {
+            return res.status(400).json({ error: 'Invalid status' });
+        }
+
+        // Must verify target user belongs to owner's village
+        const { data: targetUser } = await supabase.from('users').select('village_id').eq('id', target_user_id).single();
+        if (req.user.role === 'village_owner' && targetUser.village_id !== req.user.village_id) {
+            return res.status(403).json({ error: 'Target user is not in your village.' });
+        }
+
+        const { error } = await supabase.from('users').update({ guard_status: status }).eq('id', target_user_id);
+        if (error) throw error;
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+
+// Create Alert endpoint (protected — village_owner, admin, OR approved village_guard)
+app.post('/api/alerts/send', authMiddleware, async (req, res) => {
     try {
         const { severity, message, audio_url, audio_base64 } = req.body;
 
@@ -264,6 +356,16 @@ app.post('/api/alerts/send', authMiddleware, requireRole('village_owner', 'admin
         // Always derive them from the verified JWT so a modified client cannot spoof sender or village.
         const sent_by   = req.user.sub;
         const village_id = req.user.village_id;
+
+        // Authorization logic for Guards
+        if (req.user.role === 'villager') {
+            const { data: freshUser } = await supabase.from('users').select('guard_status').eq('id', sent_by).single();
+            if (!freshUser || freshUser.guard_status !== 'approved') {
+                return res.status(403).json({ error: 'Access denied. You are not an approved Village Guard.' });
+            }
+        } else if (req.user.role !== 'village_owner' && req.user.role !== 'admin') {
+            return res.status(403).json({ error: 'Access denied. Only Owners, Admins, or Guards can dispatch alerts.' });
+        }
 
         if (!village_id) {
             return res.status(403).json({ error: 'You are not associated with any village.' });
