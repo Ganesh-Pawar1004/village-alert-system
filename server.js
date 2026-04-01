@@ -594,7 +594,10 @@ app.get('/api/alerts/village/:villageId', authMiddleware, async (req, res) => {
 
         const { data, error } = await supabase
             .from('alerts')
-            .select('*')
+            .select(`
+                *,
+                sender:users!sent_by(name, role, guard_status)
+            `)
             .eq('village_id', villageId)
             .order('sent_at', { ascending: false })
             .limit(20);
