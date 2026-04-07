@@ -201,6 +201,25 @@ app.post('/api/villages', authMiddleware, requireRole('admin'), async (req, res)
     }
 });
 
+// Admin/Owner: Update Regions for a Village
+app.put('/api/villages/:villageId/regions', authMiddleware, async (req, res) => {
+    try {
+        const { villageId } = req.params;
+        const { regions } = req.body;
+        
+        if (req.user.role !== 'admin' && (req.user.role !== 'village_owner' || req.user.village_id !== villageId)) {
+            return res.status(403).json({ error: 'Access denied.' });
+        }
+
+        const { data, error } = await supabase.from('villages').update({ regions }).eq('id', villageId).select('*').single();
+        if (error) throw error;
+        res.json(data);
+    } catch (err) {
+        console.error('[PUT /api/villages/:villageId/regions]', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // Admin: Fetch all users mapped to villages (protected — admin only)
 app.get('/api/users/pending', authMiddleware, requireRole('admin'), async (req, res) => {
     try {
@@ -350,7 +369,7 @@ app.post('/api/guards/update', authMiddleware, requireRole('village_owner', 'adm
 // Create Alert endpoint (protected — village_owner, admin, OR approved village_guard)
 app.post('/api/alerts/send', authMiddleware, async (req, res) => {
     try {
-        const { severity, message, audio_url, audio_base64 } = req.body;
+        const { severity, message, audio_url, audio_base64, target_regions } = req.body;
 
         // Security: never trust client-sent sent_by or village_id.
         // Always derive them from the verified JWT so a modified client cannot spoof sender or village.
@@ -419,11 +438,17 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
         if (alertError) throw alertError;
 
         // Fetch all active users in village (include phone for SMS/call fallback layers)
-        const { data: users, error: usersError } = await supabase
+        let query = supabase
             .from('users')
-            .select('id, fcm_token, phone')
+            .select('id, fcm_token, phone, region')
             .eq('village_id', village_id)
             .eq('is_active', true);
+
+        if (target_regions && target_regions.length > 0 && !target_regions.includes('ALL')) {
+            query = query.in('region', target_regions);
+        }
+
+        const { data: users, error: usersError } = await query;
 
         if (usersError) throw usersError;
 

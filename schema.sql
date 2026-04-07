@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS villages (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name        TEXT NOT NULL,
   location    TEXT,
+  regions     TEXT[] DEFAULT '{}',         -- Array of valid regions specified by the Village Owner
   created_at  TIMESTAMP DEFAULT NOW()
 );
 
@@ -17,6 +18,8 @@ CREATE TABLE IF NOT EXISTS users (
   fcm_token   TEXT,                        -- updated on every app open
   is_active   BOOLEAN DEFAULT true,
   is_approved BOOLEAN DEFAULT false,       -- only village_owners need approval
+  guard_status TEXT DEFAULT 'none',        -- 'none', 'pending', 'approved'
+  region      TEXT,                        -- User's selected sub-region inside the village
   created_at  TIMESTAMP DEFAULT NOW()
 );
 
