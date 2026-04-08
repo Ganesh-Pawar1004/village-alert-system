@@ -86,6 +86,78 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 app.locals.supabase = supabase; // Make available to global authMiddleware
 
+// ─── BullMQ & Redis Setup ───────────────────────────────────────────────────
+const { Queue, Worker } = require('bullmq');
+const Redis = require('ioredis');
+
+const redisConnection = process.env.REDIS_URL ? new Redis(process.env.REDIS_URL, {
+    maxRetriesPerRequest: null,
+}) : null;
+
+// Initialize 'fallback-queue'
+let fallbackQueue = null;
+if (redisConnection) {
+    fallbackQueue = new Queue('fallback-queue', { connection: redisConnection });
+    
+    // Initialize Worker
+    const worker = new Worker('fallback-queue', async job => {
+        if (job.name === 'alert-fallback') {
+            const { alertData, users, token, message, final_audio_url } = job.data;
+            console.log(`[BullMQ Worker] Waking up exactly 3 mins later to process Exotel for Alert ${alertData.id}`);
+            
+            try {
+                // Optimized Single DB Fetch
+                const { data: deliveries, error } = await supabase
+                    .from('deliveries')
+                    .select('user_id, status')
+                    .eq('alert_id', alertData.id);
+                    
+                if (error) throw error;
+                
+                const deliveryStatusMap = new Map();
+                if (deliveries) {
+                    deliveries.forEach(d => deliveryStatusMap.set(d.user_id, d.status));
+                }
+
+                const uniqueClusters = [...new Set(users.map(u => u.head_phone || u.phone))];
+                let guaranteedOfflineClusters = [];
+                let offlineUserIds = [];
+
+                uniqueClusters.forEach(clusterPhone => {
+                    const clusterUsers = users.filter(u => (u.head_phone || u.phone) === clusterPhone);
+                    const isClusterSafe = clusterUsers.some(u => {
+                        const status = deliveryStatusMap.get(u.id);
+                        return status === 'delivered' || status === 'acked';
+                    });
+
+                    if (!isClusterSafe) {
+                        guaranteedOfflineClusters.push(clusterPhone);
+                        offlineUserIds.push(...clusterUsers.map(u => u.id));
+                    }
+                });
+
+                if (guaranteedOfflineClusters.length > 0) {
+                    console.log(`[BullMQ Worker] Native Gateways Failed. ${guaranteedOfflineClusters.length} clusters totally offline. Triggering bulk Exotel call hook.`);
+                    // Exotel Trigger Logic here...
+                    
+                    if (offlineUserIds.length > 0) {
+                        await supabase.from('deliveries')
+                            .update({ channel: 'call', status: 'sent' })
+                            .eq('alert_id', alertData.id)
+                            .in('user_id', offlineUserIds);
+                    }
+                } else {
+                    console.log(`[BullMQ Worker] Gateway Safe: All targeted clusters achieved native delivery or human acks. Bypassing Exotel.`);
+                }
+            } catch (err) {
+                console.error("[BullMQ Worker Error]:", err.message);
+            }
+        }
+    }, { connection: redisConnection });
+
+    worker.on('failed', (job, err) => console.error(`Job ${job.id} failed with ${err.message}`));
+}
+
 // Initialize Firebase Admin (optional for local dev if missing creds)
 const admin = require('firebase-admin');
 const crypto = require('crypto');
@@ -278,13 +350,13 @@ app.post('/api/users/fcm-token', authMiddleware, async (req, res) => {
 
 app.put('/api/users/profile', authMiddleware, async (req, res) => {
     try {
-        const { name, village_id } = req.body;
+        const { name, village_id, region, head_phone } = req.body;
         const user_id = req.user.sub;
         
         // Fetch current user details to check if village is changing
         const { data: currentUser } = await supabase.from('users').select('village_id, role, guard_status').eq('id', user_id).single();
 
-        let updateData = { name };
+        let updateData = { name, region, head_phone };
         
         // If they are changing village, auto-revoke guard status (to prevent carrying access to new village)
         if (village_id && currentUser && currentUser.village_id !== village_id) {
@@ -301,6 +373,43 @@ app.put('/api/users/profile', authMiddleware, async (req, res) => {
     } catch (err) {
         console.error('Profile update error:', err);
         res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// ─── ALERTS / DELIVERIES ACKNOWLEDGEMENT ──────────────────────────────────────────
+
+// Native Android HTTP delivery-ack hook (No JWT Auth, relies on strict FCM token match)
+app.post('/api/alerts/delivery-ack', async (req, res) => {
+    try {
+        const { alert_id, fcm_token } = req.body;
+        if (!alert_id || !fcm_token) return res.status(400).json({ error: 'Missing fields' });
+        
+        const { data: user } = await supabase.from('users').select('id').eq('fcm_token', fcm_token).single();
+        if (!user) return res.status(404).json({ error: 'User not found for token' });
+        
+        await supabase.from('deliveries').update({ status: 'delivered' }).eq('alert_id', alert_id).eq('user_id', user.id);
+        
+        res.json({ success: true });
+    } catch (err) {
+        console.error('delivery-ack error:', err);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// Human Click Ack hook
+app.put('/api/alerts/ack/:alert_id', authMiddleware, async (req, res) => {
+    try {
+        const { alert_id } = req.params;
+        const user_id = req.user.sub;
+        
+        await supabase.from('deliveries')
+            .update({ status: 'acked', acked_at: new Date() })
+            .eq('alert_id', alert_id)
+            .eq('user_id', user_id);
+            
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Internal error' });
     }
 });
 
@@ -478,7 +587,10 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
                             alert_id: String(alertData.id), 
                             audio_url: final_audio_url || '' 
                         },
-                        android: { priority: 'high' },
+                        android: { 
+                            priority: 'high',
+                            ttl: 86400 * 1000 // 24 hours fallback expiration entirely 
+                        },
                         apns: { payload: { aps: { sound: 'default' } } }
                     };
                     
@@ -508,46 +620,17 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
                 console.log("No FCM tokens or Firebase not configured. Skipping push.");
             }
 
-            // Layer 2: SMS fallback (Offline-safe) — wrapped in try-catch
-            try {
-                const smsRecipients = users.map(u => u.phone);
-                const smsBody = `[${token}] EMERGENCY: ${message} - Village Alert System. Do not reply.`;
+            // Layer 2: SMS Fallback Removed (SMS is restricted to OTPs only)
 
-                if (process.env.ROLLOUT_SMS === 'true' && process.env.MSG91_AUTH_KEY && smsRecipients.length > 0) {
-                    console.log(`Sending SMS offline tokens to ${smsRecipients.length} users with MSG91...`);
-                    // logic here...
-                } else {
-                    console.log(`[Flow] SMS layer (Flag: ${process.env.ROLLOUT_SMS})`);
-                }
-            } catch (err) { console.error("[Layer 2 Error]", err.message); }
-
-            // Layer 3: Auto Call (Exotel) — wrapped in try-catch
+            // Layer 3: Auto Call (Exotel) — Virtual Family Clustering Fallback via Redis BullMQ
             try {
                 if (process.env.ROLLOUT_CALL === 'true') {
-                    console.log("Scheduling Exotel Auto-call tasks in 90 seconds for unacknowledged users.");
-                    const alertTimers = new Map();
-                    users.forEach(u => {
-                        const timerId = setTimeout(async () => {
-                            try {
-                                const { data: deliveryCheck } = await supabase
-                                    .from('deliveries')
-                                    .select('status')
-                                    .eq('alert_id', alertData.id)
-                                    .eq('user_id', u.id)
-                                    .single();
-
-                                if (deliveryCheck && deliveryCheck.status !== 'acked') {
-                                    console.log(`[Exotel Auto-Call] Initiating call to User ${u.id} (${u.phone}).`);
-                                    await supabase.from('deliveries')
-                                        .update({ channel: 'call', status: 'sent' })
-                                        .eq('alert_id', alertData.id)
-                                        .eq('user_id', u.id);
-                                }
-                            } catch (e) { console.error("Exotel Timeout error", e) }
-                        }, 90 * 1000);
-                        alertTimers.set(u.id, timerId);
-                    });
-                    autoCallTimers.set(alertData.id, alertTimers);
+                    console.log("Scheduling Single-Job Bulk Exotel task in 3 minutes via BullMQ.");
+                    if (fallbackQueue) {
+                        await fallbackQueue.add('alert-fallback', { alertData, users, token, message, final_audio_url }, { delay: 180000 });
+                    } else {
+                        console.error("FATAL: Redis Queue not connected. Fallback calls aborted.");
+                    }
                 } else {
                     console.log(`[Flow] Call layer (Flag: ${process.env.ROLLOUT_CALL})`);
                 }

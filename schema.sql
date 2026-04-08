@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS users (
   is_approved BOOLEAN DEFAULT false,       -- only village_owners need approval
   guard_status TEXT DEFAULT 'none',        -- 'none', 'pending', 'approved'
   region      TEXT,                        -- User's selected sub-region inside the village
+  head_phone  TEXT,                        -- Used for Virtual Phone Clustering. Matches actual phone digits.
   created_at  TIMESTAMP DEFAULT NOW()
 );
 
