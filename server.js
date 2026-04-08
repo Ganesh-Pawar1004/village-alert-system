@@ -587,7 +587,7 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
                             message: String(message), 
                             alert_id: String(alertData.id), 
                             audio_url: final_audio_url || '',
-                            timestamp: Date.now().toString()
+                            vas_timestamp: Date.now().toString()
                         },
                         android: { 
                             priority: 'high',
