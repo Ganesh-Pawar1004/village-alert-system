@@ -578,38 +578,48 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
                 console.log(`[Push Disabled] Skipping FCM push via ROLLOUT_PUSH flag.`);
             } else if (fcmTokens.length > 0 && admin.apps.length > 0) {
                 try {
-                    const multicastMessage = {
-                        tokens: fcmTokens,
-                        data: { 
-                            title: `${severity} ALERT`, 
-                            body: message,
-                            severity: String(severity), 
-                            message: String(message), 
-                            alert_id: String(alertData.id), 
-                            audio_url: final_audio_url || '',
-                            vas_timestamp: Date.now().toString()
-                        },
-                        android: { 
-                            priority: 'high',
-                            ttl: 86400 * 1000 // 24 hours fallback expiration entirely 
-                        },
-                        apns: { payload: { aps: { sound: 'default' } } }
-                    };
+                    const results = await Promise.all(fcmTokens.map(async (token) => {
+                        try {
+                            const msg = {
+                                token: token,
+                                data: { 
+                                    title: `${severity} ALERT`, 
+                                    body: message,
+                                    severity: String(severity), 
+                                    message: String(message), 
+                                    alert_id: String(alertData.id), 
+                                    audio_url: final_audio_url || '',
+                                    vas_timestamp: Date.now().toString()
+                                },
+                                android: { 
+                                    priority: 'high',
+                                    ttl: 86400 * 1000 
+                                },
+                                apns: { payload: { aps: { sound: 'default' } } }
+                            };
+                            await admin.messaging().send(msg);
+                            return { success: true, token };
+                        } catch (err) {
+                            return { success: false, token, error: err };
+                        }
+                    }));
                     
-                    const response = await admin.messaging().sendMulticast(multicastMessage);
-                    console.log(`Successfully sent ${response.successCount} FCM messages; ${response.failureCount} failed.`);
+                    fcmResult.success = results.filter(r => r.success).length;
+                    fcmResult.failed = results.filter(r => !r.success).length;
+
+                    console.log(`Successfully sent ${fcmResult.success} FCM messages; ${fcmResult.failed} failed.`);
                     
                     // Handle stale FCM tokens
-                    if (response.failureCount > 0) {
+                    if (fcmResult.failed > 0) {
                         const failedTokens = [];
-                        response.responses.forEach((resp, idx) => {
-                            if (!resp.success) {
-                                const errCode = resp.error?.code;
-                                if (errCode === 'messaging/invalid-registration-token' || errCode === 'messaging/registration-token-not-registered') {
-                                    failedTokens.push(fcmTokens[idx]);
-                                }
+                        results.filter(r => !r.success).forEach(r => {
+                            const errCode = r.error?.code;
+                            console.error(`FCM Token Failure [${r.token}]: ${errCode || r.error.message}`);
+                            if (errCode === 'messaging/invalid-registration-token' || errCode === 'messaging/registration-token-not-registered') {
+                                failedTokens.push(r.token);
                             }
                         });
+                        
                         if (failedTokens.length > 0) {
                            console.log(`Removing ${failedTokens.length} stale FCM tokens...`);
                            await supabase.from('users').update({ fcm_token: null }).in('fcm_token', failedTokens);
