@@ -1,8 +1,8 @@
 require('dotenv').config();
-const express    = require('express');
-const cors       = require('cors');
-const rateLimit  = require('express-rate-limit');
-const helmet     = require('helmet');
+const express = require('express');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
 const { createClient } = require('@supabase/supabase-js');
 const { requestOtp, verifyOtp, authMiddleware, requireRole, otpStore } = require('./src/auth');
 
@@ -53,8 +53,8 @@ const extraOrigin = process.env.ALLOWED_LOCAL_ORIGIN;
 
 const allowedOrigins = {
     development: ['http://localhost:5173', 'http://localhost:3000', 'capacitor://localhost', 'http://localhost', 'https://localhost'],
-    uat:         ['https://uat.village-alert.app', 'capacitor://localhost', 'http://localhost', 'http://localhost:5173', 'https://localhost'],
-    production:  ['https://village-alert.app', 'capacitor://localhost', 'http://localhost', 'http://localhost:5173', 'https://localhost'],
+    uat: ['https://uat.village-alert.app', 'capacitor://localhost', 'http://localhost', 'http://localhost:5173', 'https://localhost'],
+    production: ['https://village-alert.app', 'capacitor://localhost', 'http://localhost', 'http://localhost:5173', 'https://localhost'],
 };
 
 app.use(cors({
@@ -98,22 +98,22 @@ const redisConnection = process.env.REDIS_URL ? new Redis(process.env.REDIS_URL,
 let fallbackQueue = null;
 if (redisConnection) {
     fallbackQueue = new Queue('fallback-queue', { connection: redisConnection });
-    
+
     // Initialize Worker
     const worker = new Worker('fallback-queue', async job => {
         if (job.name === 'alert-fallback') {
             const { alertData, users, token, message, final_audio_url } = job.data;
             console.log(`[BullMQ Worker] Waking up exactly 3 mins later to process Exotel for Alert ${alertData.id}`);
-            
+
             try {
                 // Optimized Single DB Fetch
                 const { data: deliveries, error } = await supabase
                     .from('deliveries')
                     .select('user_id, status')
                     .eq('alert_id', alertData.id);
-                    
+
                 if (error) throw error;
-                
+
                 const deliveryStatusMap = new Map();
                 if (deliveries) {
                     deliveries.forEach(d => deliveryStatusMap.set(d.user_id, d.status));
@@ -139,7 +139,7 @@ if (redisConnection) {
                 if (guaranteedOfflineClusters.length > 0) {
                     console.log(`[BullMQ Worker] Native Gateways Failed. ${guaranteedOfflineClusters.length} clusters totally offline. Triggering bulk Exotel call hook.`);
                     // Exotel Trigger Logic here...
-                    
+
                     if (offlineUserIds.length > 0) {
                         await supabase.from('deliveries')
                             .update({ channel: 'call', status: 'sent' })
@@ -214,15 +214,15 @@ const verifyLimiter = rateLimit({
 });
 
 // ─── Auth Routes (Public) ─────────────────────────────────────────────────────
-app.post('/api/auth/request-otp', otpLimiter,    requestOtp);
-app.post('/api/auth/verify-otp',  verifyLimiter, (req, res) => verifyOtp(req, res, supabase));
+app.post('/api/auth/request-otp', otpLimiter, requestOtp);
+app.post('/api/auth/verify-otp', verifyLimiter, (req, res) => verifyOtp(req, res, supabase));
 
 // Silent token refresh — keep users permanently signed in
 app.post('/api/auth/refresh', authMiddleware, async (req, res) => {
     try {
-        const jwt    = require('jsonwebtoken');
+        const jwt = require('jsonwebtoken');
         const secret = process.env.JWT_SECRET || 'village-alert-system-dev-secret-CHANGE-IN-PROD';
-        const expiry = process.env.JWT_EXPIRY  || '7d';
+        const expiry = process.env.JWT_EXPIRY || '7d';
 
         // Fetch fresh user data in case role/approval changed since last login
         const { data: user } = await supabase
@@ -264,7 +264,7 @@ app.post('/api/villages', authMiddleware, requireRole('admin'), async (req, res)
         const { name, location, admin_id } = req.body;
         // In reality, you'd check if admin_id is an actual admin
         if (!name) return res.status(400).json({ error: 'Missing name' });
-        
+
         const { data, error } = await supabase.from('villages').insert([{ name, location }]).select('*').single();
         if (error) throw error;
         res.status(201).json(data);
@@ -278,7 +278,7 @@ app.put('/api/villages/:villageId/regions', authMiddleware, async (req, res) => 
     try {
         const { villageId } = req.params;
         const { regions } = req.body;
-        
+
         if (req.user.role !== 'admin' && (req.user.role !== 'village_owner' || req.user.village_id !== villageId)) {
             return res.status(403).json({ error: 'Access denied.' });
         }
@@ -352,12 +352,12 @@ app.put('/api/users/profile', authMiddleware, async (req, res) => {
     try {
         const { name, village_id, region, head_phone } = req.body;
         const user_id = req.user.sub;
-        
+
         // Fetch current user details to check if village is changing
         const { data: currentUser } = await supabase.from('users').select('village_id, role, guard_status').eq('id', user_id).single();
 
         let updateData = { name, region, head_phone };
-        
+
         // If they are changing village, auto-revoke guard status (to prevent carrying access to new village)
         if (village_id && currentUser && currentUser.village_id !== village_id) {
             updateData.village_id = village_id;
@@ -368,7 +368,7 @@ app.put('/api/users/profile', authMiddleware, async (req, res) => {
 
         const { error } = await supabase.from('users').update(updateData).eq('id', user_id);
         if (error) throw error;
-        
+
         res.json({ success: true, message: 'Profile updated' });
     } catch (err) {
         console.error('Profile update error:', err);
@@ -379,16 +379,16 @@ app.put('/api/users/profile', authMiddleware, async (req, res) => {
 // ─── ALERTS / DELIVERIES ACKNOWLEDGEMENT ──────────────────────────────────────────
 
 // Native Android HTTP delivery-ack hook (No JWT Auth, relies on strict FCM token match)
-app.post('/api/alerts/delivery-ack', async (req, res) => {
+app.post('/api/alerts/delivery-ack', express.json(), async (req, res) => {
     try {
-        const { alert_id, fcm_token } = req.body;
+        const { alert_id, fcm_token } = req.body || {};
         if (!alert_id || !fcm_token) return res.status(400).json({ error: 'Missing fields' });
-        
+
         const { data: user } = await supabase.from('users').select('id').eq('fcm_token', fcm_token).single();
         if (!user) return res.status(404).json({ error: 'User not found for token' });
-        
+
         await supabase.from('deliveries').update({ status: 'delivered' }).eq('alert_id', alert_id).eq('user_id', user.id);
-        
+
         res.json({ success: true });
     } catch (err) {
         console.error('delivery-ack error:', err);
@@ -401,12 +401,12 @@ app.put('/api/alerts/ack/:alert_id', authMiddleware, async (req, res) => {
     try {
         const { alert_id } = req.params;
         const user_id = req.user.sub;
-        
+
         await supabase.from('deliveries')
             .update({ status: 'acked', acked_at: new Date() })
             .eq('alert_id', alert_id)
             .eq('user_id', user_id);
-            
+
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Internal error' });
@@ -422,7 +422,7 @@ app.post('/api/guards/apply', authMiddleware, async (req, res) => {
 
         const { error } = await supabase.from('users').update({ guard_status: 'pending' }).eq('id', user_id);
         if (error) throw error;
-        
+
         res.json({ success: true, message: 'Application submitted successfully.' });
     } catch (err) {
         res.status(500).json({ error: 'Internal server error' });
@@ -482,7 +482,7 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
 
         // Security: never trust client-sent sent_by or village_id.
         // Always derive them from the verified JWT so a modified client cannot spoof sender or village.
-        const sent_by   = req.user.sub;
+        const sent_by = req.user.sub;
         const village_id = req.user.village_id;
 
         // Authorization logic for Guards
@@ -515,13 +515,13 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
                 const base64Data = audio_base64.replace(/^data:audio\/\w+;base64,/, "");
                 const buffer = Buffer.from(base64Data, 'base64');
                 const fileName = `alert_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.webm`;
-                
+
                 const { error: uploadError } = await supabase.storage
                     .from('alert-audio')
                     .upload(fileName, buffer, { contentType: 'audio/webm', upsert: true });
-                    
+
                 if (uploadError) throw uploadError;
-                
+
                 const { data: publicUrlData } = supabase.storage.from('alert-audio').getPublicUrl(fileName);
                 final_audio_url = publicUrlData.publicUrl;
                 console.log(`[Storage] Uploaded audio successfully: ${final_audio_url}`);
@@ -574,6 +574,8 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
 
             // Send FCM to users with token
             const fcmTokens = users.filter(u => u.fcm_token).map(u => u.fcm_token);
+            let fcmResult = { success: 0, failed: 0 };
+
             if (process.env.ROLLOUT_PUSH !== 'true') {
                 console.log(`[Push Disabled] Skipping FCM push via ROLLOUT_PUSH flag.`);
             } else if (fcmTokens.length > 0 && admin.apps.length > 0) {
@@ -582,18 +584,18 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
                         try {
                             const msg = {
                                 token: token,
-                                data: { 
-                                    title: `${severity} ALERT`, 
+                                data: {
+                                    title: `${severity} ALERT`,
                                     body: message,
-                                    severity: String(severity), 
-                                    message: String(message), 
-                                    alert_id: String(alertData.id), 
+                                    severity: String(severity),
+                                    message: String(message),
+                                    alert_id: String(alertData.id),
                                     audio_url: final_audio_url || '',
                                     vas_timestamp: Date.now().toString()
                                 },
-                                android: { 
+                                android: {
                                     priority: 'high',
-                                    ttl: 86400 * 1000 
+                                    ttl: 86400 * 1000
                                 },
                                 apns: { payload: { aps: { sound: 'default' } } }
                             };
@@ -603,12 +605,12 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
                             return { success: false, token, error: err };
                         }
                     }));
-                    
+
                     fcmResult.success = results.filter(r => r.success).length;
                     fcmResult.failed = results.filter(r => !r.success).length;
 
                     console.log(`Successfully sent ${fcmResult.success} FCM messages; ${fcmResult.failed} failed.`);
-                    
+
                     // Handle stale FCM tokens
                     if (fcmResult.failed > 0) {
                         const failedTokens = [];
@@ -619,10 +621,10 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
                                 failedTokens.push(r.token);
                             }
                         });
-                        
+
                         if (failedTokens.length > 0) {
-                           console.log(`Removing ${failedTokens.length} stale FCM tokens...`);
-                           await supabase.from('users').update({ fcm_token: null }).in('fcm_token', failedTokens);
+                            console.log(`Removing ${failedTokens.length} stale FCM tokens...`);
+                            await supabase.from('users').update({ fcm_token: null }).in('fcm_token', failedTokens);
                         }
                     }
                 } catch (fcmErr) {
@@ -658,8 +660,8 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
             } catch (err) { console.error("[Layer 4 Error]", err.message); }
         }
 
-        res.status(201).json({ 
-            message: 'Alert sent successfully', 
+        res.status(201).json({
+            message: 'Alert sent successfully',
             alert: alertData,
             total_users: users ? users.length : 0
         });
@@ -690,9 +692,9 @@ app.get('/api/alerts/:id/stats', authMiddleware, async (req, res) => {
         const stats = {
             total: deliveries.length,
             acked: deliveries.filter(d => d.status === 'acked').length,
-            fcm:   deliveries.filter(d => d.channel === 'fcm' || (d.channel === 'sms' && d.status === 'pending')).length, // default fallback
-            sms:   deliveries.filter(d => d.channel === 'sms').length,
-            call:  deliveries.filter(d => d.channel === 'call').length,
+            fcm: deliveries.filter(d => d.channel === 'fcm' || (d.channel === 'sms' && d.status === 'pending')).length, // default fallback
+            sms: deliveries.filter(d => d.channel === 'sms').length,
+            call: deliveries.filter(d => d.channel === 'call').length,
         };
 
         res.json(stats);
@@ -721,7 +723,7 @@ app.get('/api/alerts/village/:villageId', authMiddleware, async (req, res) => {
             .eq('village_id', villageId)
             .order('sent_at', { ascending: false })
             .limit(20);
-            
+
         if (error) throw error;
         res.json(data);
     } catch (err) {
@@ -735,7 +737,7 @@ app.put('/api/alerts/:id/retract', authMiddleware, requireRole('village_owner', 
     try {
         const { id } = req.params;
         const { user_id } = req.body; // should be the admin handling it
-        
+
         // 1. Get the alert to find its village_id
         const { data: alertData, error: fetchErr } = await supabase.from('alerts').select('village_id').eq('id', id).single();
         if (fetchErr) throw fetchErr;
@@ -743,7 +745,7 @@ app.put('/api/alerts/:id/retract', authMiddleware, requireRole('village_owner', 
         // 2. Mark alert as resolved
         const { error } = await supabase.from('alerts').update({ resolved_at: new Date().toISOString() }).eq('id', id);
         if (error) throw error;
-        
+
         // 3. Cancel all pending Exotel calls for this alert
         if (autoCallTimers.has(id)) {
             const userTimers = autoCallTimers.get(id);
@@ -759,17 +761,24 @@ app.put('/api/alerts/:id/retract', authMiddleware, requireRole('village_owner', 
                 if (users && users.length > 0) {
                     const tokens = users.map(u => u.fcm_token);
                     if (tokens.length > 0) {
-                        const multicastMessage = {
-                            tokens,
-                            data: { 
-                                action: 'abort', 
-                                alert_id: String(id),
-                                title: 'Alert Resolved',
-                                body: 'The emergency has been resolved.'
+                        const results = await Promise.all(tokens.map(async (token) => {
+                            try {
+                                await admin.messaging().send({
+                                    token,
+                                    data: {
+                                        action: 'abort',
+                                        alert_id: String(id),
+                                        title: 'Alert Resolved',
+                                        body: 'The emergency has been resolved.'
+                                    }
+                                });
+                                return true;
+                            } catch (e) {
+                                return false;
                             }
-                        };
-                        await admin.messaging().sendEachForMulticast(multicastMessage);
-                        console.log(`[Abort] Sent silence signal to ${tokens.length} devices.`);
+                        }));
+                        const successCount = results.filter(r => r).length;
+                        console.log(`[Abort] Sent silence signal to ${successCount}/${tokens.length} devices.`);
                     }
                 }
             }
