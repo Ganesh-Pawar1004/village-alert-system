@@ -596,7 +596,7 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
                         apns: { payload: { aps: { sound: 'default' } } }
                     };
                     
-                    const response = await admin.messaging().sendEachForMulticast(multicastMessage);
+                    const response = await admin.messaging().sendMulticast(multicastMessage);
                     console.log(`Successfully sent ${response.successCount} FCM messages; ${response.failureCount} failed.`);
                     
                     // Handle stale FCM tokens
