@@ -546,14 +546,15 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
 
         if (alertError) throw alertError;
 
-        // Fetch all active users in village (include phone for SMS/call fallback layers)
+        // Fetch all active users in village (include phone and head_phone for Exotel fallback layers)
         let query = supabase
             .from('users')
-            .select('id, fcm_token, phone, region')
+            .select('id, fcm_token, phone, head_phone, region')
             .eq('village_id', village_id)
             .eq('is_active', true);
 
         if (target_regions && target_regions.length > 0 && !target_regions.includes('ALL')) {
+            // Strictly target explicit regions. Users without a chosen region will ONLY be alerted if 'ALL' is selected.
             query = query.in('region', target_regions);
         }
 
@@ -585,7 +586,8 @@ app.post('/api/alerts/send', authMiddleware, async (req, res) => {
                             severity: String(severity), 
                             message: String(message), 
                             alert_id: String(alertData.id), 
-                            audio_url: final_audio_url || '' 
+                            audio_url: final_audio_url || '',
+                            timestamp: Date.now().toString()
                         },
                         android: { 
                             priority: 'high',
